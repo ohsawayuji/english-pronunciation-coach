@@ -3,7 +3,6 @@ import azure.cognitiveservices.speech as speechsdk
 import os
 import uuid
 import json
-import pandas as pd
 import string
 
 # --- ページ設定 ---
@@ -78,7 +77,7 @@ def assess_pronunciation(audio_file_path, reference_text):
     speech_config.speech_recognition_language = "en-US" 
     speech_config.output_format = speechsdk.OutputFormat.Detailed
     
-    # 沈黙タイムアウト延長（長文・言い淀み対策）
+    # 沈黙タイムアウト延長（長文・言い淀み対策 5秒）
     speech_config.set_property(speechsdk.PropertyId.Speech_SegmentationSilenceTimeoutMs, "5000")
     speech_config.set_property(speechsdk.PropertyId.SpeechServiceConnection_EndSilenceTimeoutMs, "5000")
     speech_config.set_property(speechsdk.PropertyId.SpeechServiceConnection_InitialSilenceTimeoutMs, "5000")
@@ -116,7 +115,7 @@ def generate_tts(text, filename):
 
 # --- UI ---
 st.title("🗣️ AI英語発音コーチ")
-st.info("機能追加：録音した自分の声をダウンロードボタンから保存できるようになりました。")
+st.caption("Grammar & Pronunciation Check")
 
 if 'target_text' not in st.session_state:
     st.session_state.target_text = "I like playing soccer with my friends."
@@ -141,7 +140,7 @@ if audio_value:
     with open(input_filename, "wb") as f:
         f.write(audio_value.getbuffer())
     
-    # ★★★ ここに追加：ダウンロードボタン ★★★
+    # ダウンロードボタン
     st.download_button(
         label="💾 録音データをダウンロード",
         data=audio_value,
@@ -193,7 +192,6 @@ if audio_value:
             
             # ペナルティチェック（スペル不一致なら強制減点）
             penalty_applied = False
-            debug_note = ""
 
             for r_w in words_raw:
                 r_offset = r_w.get('Offset', 0)
@@ -212,38 +210,30 @@ if audio_value:
             if penalty_applied:
                 if score >= 85:
                     score = 80 # 緑→黄色へ強制変更
-                    debug_note = " (Penalty)"
             
             # 判定ロジック
-            final_error = "Normal"
             html = ""
             
             if raw_error.lower() == "insertion":
-                final_error = "Insertion"
                 html = f"<span class='word-insertion'>({word_text})</span>"
             elif raw_error == "Omission":
                 total_words_for_score += 1
                 weak_words.append(word_text)
-                final_error = "Omission"
                 html = f"<span class='word-omission'>{word_text}</span>"
             elif raw_error == "Mispronunciation" and score <= 40:
                 total_words_for_score += 1
                 weak_words.append(word_text)
-                final_error = "Low Score -> Omission"
                 html = f"<span class='word-omission'>{word_text}</span>"
             else:
                 total_words_for_score += 1
                 if score >= 85:
                     css = "word-green"
-                    final_error = "Excellent"
                     green_count += 1
                 elif score >= 75:
                     css = "word-yellow"
-                    final_error = "Good" + debug_note
                     weak_words.append(word_text)
                 else:
                     css = "word-red"
-                    final_error = "Bad" + debug_note
                     weak_words.append(word_text)
                 html = f"<span class='{css}' title='{score}点'>{word_text}</span>"
 
@@ -253,8 +243,6 @@ if audio_value:
                 'offset': offset,
                 'duration': duration,
                 'source': 'assessment',
-                'debug_raw': raw_error,
-                'debug_final': final_error,
                 'score': score
             })
 
@@ -288,8 +276,6 @@ if audio_value:
                         'offset': r_offset + 1,
                         'duration': r_duration,
                         'source': 'raw_ghost',
-                        'debug_raw': 'Mismatch/Insertion',
-                        'debug_final': 'Ghost (Diff)',
                         'score': '-'
                     })
 
@@ -326,20 +312,6 @@ if audio_value:
         st.markdown(f"<div class='correction-box'>{final_html}</div>", unsafe_allow_html=True)
         st.caption("凡例: 🟢OK 🔴NG 🔘取り消し線(読み飛ばし/不一致元) 🟣紫バッジ(実際に言った単語/挿入語)")
 
-        st.markdown("---")
-        st.subheader("🧐 判定ロジック診断テーブル")
-        
-        debug_data = []
-        for item in display_items:
-            debug_data.append({
-                "順序": item['offset'],
-                "単語": item['text'],
-                "ソース": item['source'],
-                "判定": item['debug_final'],
-                "修正後Score": item['score']
-            })
-        st.dataframe(pd.DataFrame(debug_data))
-
         st.divider()
         
         if len(weak_words) > 0:
@@ -365,13 +337,7 @@ if audio_value:
                             elif s >= 75: st.warning(f"🟡 {s:.0f}点")
                             else: st.error(f"🔴 {s:.0f}点")
         else:
-            st.success("弱点単語はありません")
-
-        with st.expander("🛠️ 開発用データ確認"):
-            st.write("Words (Assessment):")
-            st.json(words_score)
-            st.write("Words (Raw):")
-            st.json(words_raw)
+            st.success("Perfect! 練習が必要な単語はありません。")
 
     elif result_obj.reason == speechsdk.ResultReason.NoMatch:
         st.error("音声を認識できませんでした。")
