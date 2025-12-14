@@ -1,9 +1,9 @@
 import streamlit as st
 import azure.cognitiveservices.speech as speechsdk
 import os
-import time
 import uuid
 import json
+import pandas as pd  # データ表示用にpandasを使用
 
 # --- ページ設定 ---
 st.set_page_config(page_title="AI英語発音コーチ", page_icon="🗣️")
@@ -26,22 +26,11 @@ st.markdown("""
         margin-bottom: 20px;
     }
     
-    /* 単語ごとのスタイル */
     .word-green { color: #28a745; font-weight: bold; margin-right: 5px; }
     .word-yellow { color: #d39e00; font-weight: bold; margin-right: 5px; }
     .word-red { color: #dc3545; font-weight: bold; margin-right: 5px; text-decoration: underline; text-decoration-style: dotted; }
-    
-    /* 読み飛ばし（グレー取り消し線） */
     .word-omission { color: #adb5bd; text-decoration: line-through; margin-right: 5px; }
-    
-    /* 挿入（紫のカッコ） */
-    .word-insertion { 
-        color: #6f42c1; 
-        font-weight: bold; 
-        font-style: italic;
-        margin-left: 2px; 
-        margin-right: 8px; 
-    }
+    .word-insertion { color: #6f42c1; font-weight: bold; font-style: italic; margin-left: 2px; margin-right: 8px; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -99,7 +88,7 @@ def generate_tts(text, filename):
 
 # --- UI ---
 st.title("🗣️ AI英語発音コーチ")
-st.info("判定ロジックを改良し、余計な言葉（挿入）の検出精度を向上させました。")
+st.info("診断モード：単語ごとの判定理由を表形式で表示します。")
 
 if 'target_text' not in st.session_state:
     st.session_state.target_text = "I like playing soccer with my friends."
@@ -142,6 +131,9 @@ if audio_value:
             green_count = 0
             weak_words = []
             feedback_html_parts = []
+            
+            # 診断用データリスト
+            debug_table_data = []
 
             if not words_data:
                 st.warning("単語データの解析に失敗しました。")
@@ -150,53 +142,58 @@ if audio_value:
                     word_text = word_info.get('Word') or word_info.get('DisplayWord') or "???"
                     pron_acc = word_info.get('PronunciationAssessment', {})
                     
-                    # ErrorTypeを複数の場所から探す（万が一のため）
+                    # 判定情報の取得
                     raw_error_type = pron_acc.get('ErrorType') or word_info.get('ErrorType') or 'None'
                     accuracy = pron_acc.get('AccuracyScore', 0)
-
+                    
                     # --- 判定ロジック ---
                     
-                    # 1. 挿入判定 (Insertion) - 大文字小文字を区別せずチェック
+                    # 1. 挿入判定 (Insertion)
                     if raw_error_type.lower() == "insertion":
-                        final_error_type = "Insertion"
-                    
-                    # 2. 読み飛ばし判定 (Omission) - 低スコアも含む
-                    else:
-                        IGNORE_THRESHOLD = 40
-                        # 元々Omission、または発音ミスかつスコアが極端に低い場合
-                        if raw_error_type == "Omission" or (raw_error_type == "Mispronunciation" and accuracy <= IGNORE_THRESHOLD):
-                            final_error_type = "Omission"
-                        else:
-                            final_error_type = "Normal"
-
-                    # --- 表示ロジック ---
-
-                    if final_error_type == "Insertion":
-                        # 紫色のカッコ
+                        final_error_type = "Insertion (紫)"
                         feedback_html_parts.append(f"<span class='word-insertion'>({word_text})</span>")
                     
-                    elif final_error_type == "Omission":
+                    # 2. 読み飛ばし判定 (Omission)
+                    elif raw_error_type == "Omission":
                         total_words_for_score += 1
                         weak_words.append(word_text)
-                        # グレーの取り消し線
+                        final_error_type = "Omission (灰)"
                         feedback_html_parts.append(f"<span class='word-omission'>{word_text}</span>")
                     
-                    else: # Normal
+                    # 3. 低スコア判定 (みなしOmission)
+                    elif raw_error_type == "Mispronunciation" and accuracy <= 40:
                         total_words_for_score += 1
-                        
+                        weak_words.append(word_text)
+                        final_error_type = "Low Score -> Omission (灰)"
+                        feedback_html_parts.append(f"<span class='word-omission'>{word_text}</span>")
+                    
+                    # 4. 通常判定
+                    else:
+                        total_words_for_score += 1
                         if accuracy >= 85:
                             css_class = "word-green"
+                            final_error_type = "Excellent (緑)"
                             green_count += 1
                         elif accuracy >= 75:
                             css_class = "word-yellow"
+                            final_error_type = "Good (黄)"
                             weak_words.append(word_text)
                         else:
                             css_class = "word-red"
+                            final_error_type = "Bad (赤)"
                             weak_words.append(word_text)
                         
                         feedback_html_parts.append(f"<span class='{css_class}' title='{accuracy}点'>{word_text}</span>")
 
-                # --- 総合評価 ---
+                    # 診断テーブル用に追加
+                    debug_table_data.append({
+                        "単語": word_text,
+                        "AI判定 (Raw)": raw_error_type,
+                        "スコア": accuracy,
+                        "最終表示": final_error_type
+                    })
+
+                # --- 結果表示 ---
                 if total_words_for_score > 0:
                     green_ratio = (green_count / total_words_for_score) * 100
                 else:
@@ -218,14 +215,19 @@ if audio_value:
                 st.divider()
 
                 st.subheader("📝 詳細レポート")
-                
-                st.markdown("##### 👂 聞き取り内容 (Raw Text)")
-                st.info(f"「 {raw_text_heard} 」" if raw_text_heard else "（音声検出なし）")
+                st.markdown("##### 👂 聞き取り内容")
+                st.info(f"「 {raw_text_heard} 」")
 
                 st.markdown("##### 📊 添削結果")
                 final_html = "".join(feedback_html_parts)
                 st.markdown(f"<div class='correction-box'>{final_html}</div>", unsafe_allow_html=True)
-                st.caption("凡例: 🟢OK 🔴NG 🔘取り消し線(読み飛ばし/超低スコア) 🟣(余計な語)")
+                
+                # --- ★★★ ここが新しい部分です ★★★ ---
+                st.markdown("---")
+                st.subheader("🧐 判定ロジック診断テーブル")
+                st.write("「添削結果」にうまく表示されない場合、ここでAIがどう判定しているか確認してください。")
+                st.dataframe(pd.DataFrame(debug_table_data))
+                # -------------------------------------
 
                 st.divider()
 
@@ -252,18 +254,13 @@ if audio_value:
                                     if s >= 85: st.success(f"🎉 {s:.0f}点")
                                     elif s >= 75: st.warning(f"🟡 {s:.0f}点")
                                     else: st.error(f"🔴 {s:.0f}点")
-                    else:
-                        st.info("練習対象が見つかりません。")
-                else:
-                    st.success("弱点なし！")
         else:
             st.error("解析失敗 (NBest error)")
             
-        with st.expander("🛠️ 開発用データ確認"):
+        with st.expander("🛠️ 開発用データ確認 (Raw JSON)"):
             st.json(json.loads(json_str))
 
     elif result_obj.reason == speechsdk.ResultReason.NoMatch:
         st.error("音声を認識できませんでした。")
     elif result_obj.reason == speechsdk.ResultReason.Canceled:
         st.error("処理中断。APIキーを確認してください。")
-
