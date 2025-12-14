@@ -78,9 +78,7 @@ def assess_pronunciation(audio_file_path, reference_text):
     speech_config.speech_recognition_language = "en-US" 
     speech_config.output_format = speechsdk.OutputFormat.Detailed
     
-    # ★★★ ここが重要：沈黙タイムアウトの延長設定 ★★★
-    # 3000ms(3秒)以上の沈黙がないと切らない設定（デフォルトはもっと短い）
-    # これにより、言い淀みや長いポーズがあっても、AIは「まだ続きがある」と判断して待ちます。
+    # 沈黙タイムアウト延長（長文・言い淀み対策）
     speech_config.set_property(speechsdk.PropertyId.Speech_SegmentationSilenceTimeoutMs, "5000")
     speech_config.set_property(speechsdk.PropertyId.SpeechServiceConnection_EndSilenceTimeoutMs, "5000")
     speech_config.set_property(speechsdk.PropertyId.SpeechServiceConnection_InitialSilenceTimeoutMs, "5000")
@@ -118,7 +116,7 @@ def generate_tts(text, filename):
 
 # --- UI ---
 st.title("🗣️ AI英語発音コーチ")
-st.info("長文・言い淀み対策：5秒程度の沈黙ならAIが録音を切らずに待ち続けるように設定しました。")
+st.info("機能追加：録音した自分の声をダウンロードボタンから保存できるようになりました。")
 
 if 'target_text' not in st.session_state:
     st.session_state.target_text = "I like playing soccer with my friends."
@@ -138,9 +136,18 @@ st.markdown("##### ステップ2：録音して採点")
 audio_value = st.audio_input("録音ボタンを押して全文を読む")
 
 if audio_value:
+    # 録音データを保存
     input_filename = get_filename("temp_input")
     with open(input_filename, "wb") as f:
         f.write(audio_value.getbuffer())
+    
+    # ★★★ ここに追加：ダウンロードボタン ★★★
+    st.download_button(
+        label="💾 録音データをダウンロード",
+        data=audio_value,
+        file_name="my_pronunciation.wav",
+        mime="audio/wav"
+    )
 
     with st.spinner("AIが分析中..."):
         json_str_score, json_str_raw, result_obj, raw_text_heard = assess_pronunciation(input_filename, target_text)
@@ -174,7 +181,7 @@ if audio_value:
         green_count = 0
         weak_words = []
         
-        # A. 採点結果（Assessment）をリストに追加
+        # A. 採点結果（Assessment）処理
         for w in words_score:
             word_text = w.get('Word') or w.get('DisplayWord') or "???"
             offset = w.get('Offset', 0)
@@ -184,7 +191,7 @@ if audio_value:
             raw_error = pron_acc.get('ErrorType') or w.get('ErrorType') or 'None'
             score = pron_acc.get('AccuracyScore', 0)
             
-            # ペナルティチェック
+            # ペナルティチェック（スペル不一致なら強制減点）
             penalty_applied = False
             debug_note = ""
 
@@ -204,7 +211,7 @@ if audio_value:
             
             if penalty_applied:
                 if score >= 85:
-                    score = 80 # 強制減点
+                    score = 80 # 緑→黄色へ強制変更
                     debug_note = " (Penalty)"
             
             # 判定ロジック
