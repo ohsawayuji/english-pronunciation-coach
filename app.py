@@ -55,7 +55,8 @@ def assess_pronunciation(audio_file_path, reference_text):
     
     if result.reason == speechsdk.ResultReason.RecognizedSpeech:
         pronunciation_result = speechsdk.PronunciationAssessmentResult(result)
-        return pronunciation_result, result
+        # raw_text (文字起こし結果) も一緒に返す
+        return pronunciation_result, result.text
     else:
         return None, None
 
@@ -97,52 +98,42 @@ if audio_value:
         f.write(audio_value.getbuffer())
 
     with st.spinner("AIが分析中..."):
-        score_result, raw_result = assess_pronunciation(input_filename, target_text)
+        score_result, recognized_text = assess_pronunciation(input_filename, target_text)
 
     if score_result:
-        words = speechsdk.PronunciationAssessmentResult(raw_result).words
+        words = score_result.words
         
         # 変数初期化
         total_words_for_score = 0
         green_count = 0
-        weak_words = []      # 練習用リスト
+        weak_words = []
+        feedback_html_parts = []
         
-        # 表示用データ
-        feedback_html_parts = []     # 詳細レポート（色付き）用
-        heard_words_list = []        # 「聞こえた音」再現用
-
         # --- 判定ループ ---
         for word in words:
-            # ★ここを修正しました：エラータイプを安全に文字列で取得
-            error_type_str = str(word.error_type)
+            # エラータイプを安全に文字列で取得 ("None", "Omission", "Insertion", "Mispronunciation" 等)
+            error_type = str(word.error_type)
             
-            # --- A. 「聞こえた音」リストの作成 ---
-            # Omission（読み飛ばし）以外は、口から発せられた音なのでリストに入れる
-            if "Omission" not in error_type_str:
-                heard_words_list.append(word.word)
-
-            # --- B. 採点と色分け ---
-            
-            # 1. 挿入誤り（Insertion）: 余計な単語
-            if "Insertion" in error_type_str:
-                # 採点の分母には含めないが、表示は紫にする
+            # 1. 挿入誤り（Insertion）: 余計な単語を言った
+            # これが「余計な単語」として紫で表示されます
+            if "Insertion" in error_type:
                 feedback_html_parts.append(
-                    f"<span style='color:purple; font-style:italic; font-size:18px;'>({word.word})</span>"
+                    f"<span style='color:purple; font-style:italic; font-size:18px; margin-right:5px;'>({word.word})</span>"
                 )
             
             # 2. 読み飛ばし（Omission）: 言わなかった単語
-            elif "Omission" in error_type_str:
+            # これが「打ち消し線」として表示されます
+            elif "Omission" in error_type:
                 total_words_for_score += 1
                 weak_words.append(word.word)
                 feedback_html_parts.append(
                     f"<span style='color:#b0b0b0; text-decoration:line-through; font-size:24px; margin-right:5px;'>{word.word}</span>"
                 )
 
-            # 3. その他の通常判定（None, Mispronunciation）
+            # 3. 通常の単語（正解、または発音ミス）
             else:
                 total_words_for_score += 1
                 
-                # スコアによる色分け
                 if word.accuracy_score >= 85:
                     color = "green"
                     green_count += 1
@@ -158,8 +149,6 @@ if audio_value:
                 )
 
         # --- 集計 ---
-        recognized_sentence = " ".join(heard_words_list) # リストを文字列に変換
-        
         if total_words_for_score > 0:
             green_ratio = (green_count / total_words_for_score) * 100
         else:
@@ -188,13 +177,13 @@ if audio_value:
         # --- 📝 詳細レポート ---
         st.subheader("📝 詳細レポート")
         
-        # 👂 実際に聞こえた文章
+        # 👂 実際に聞こえた文章 (Raw Text)
+        # ここには読み飛ばした単語は表示されず、余計に言った単語は表示されます
         st.markdown("##### 👂 AIが聞き取った内容")
-        if not recognized_sentence:
+        if not recognized_text:
              st.info("（音声が検出されませんでした）")
         else:
-             # ここに「soccer soccer」や「soccer game」などがそのまま表示されます
-             st.info(f"「 {recognized_sentence} 」")
+             st.info(f"「 {recognized_text} 」")
 
         # 📊 添削結果
         st.markdown("##### 📊 添削結果")
@@ -230,7 +219,7 @@ if audio_value:
                     with open(practice_file, "wb") as f:
                         f.write(practice_audio.getbuffer())
                     
-                    p_score, p_raw = assess_pronunciation(practice_file, selected_word)
+                    p_score, p_raw_text = assess_pronunciation(practice_file, selected_word)
                     
                     if p_score:
                         single_score = p_score.accuracy_score
