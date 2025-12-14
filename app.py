@@ -26,11 +26,22 @@ st.markdown("""
         margin-bottom: 20px;
     }
     
-    .word-green { color: #28a745; font-weight: bold; margin-right: 8px; }
-    .word-yellow { color: #d39e00; font-weight: bold; margin-right: 8px; }
-    .word-red { color: #dc3545; font-weight: bold; margin-right: 8px; text-decoration: underline; text-decoration-style: dotted; }
-    .word-omission { color: #adb5bd; text-decoration: line-through; margin-right: 8px; }
-    .word-insertion { color: #6f42c1; font-style: italic; font-weight: bold; margin-left: 4px; margin-right: 10px; }
+    /* 単語ごとのスタイル */
+    .word-green { color: #28a745; font-weight: bold; margin-right: 5px; }
+    .word-yellow { color: #d39e00; font-weight: bold; margin-right: 5px; }
+    .word-red { color: #dc3545; font-weight: bold; margin-right: 5px; text-decoration: underline; text-decoration-style: dotted; }
+    
+    /* 読み飛ばし（グレー取り消し線） */
+    .word-omission { color: #adb5bd; text-decoration: line-through; margin-right: 5px; }
+    
+    /* 挿入（紫のカッコ） */
+    .word-insertion { 
+        color: #6f42c1; 
+        font-weight: bold; 
+        font-style: italic;
+        margin-left: 2px; 
+        margin-right: 8px; 
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -56,6 +67,7 @@ def assess_pronunciation(audio_file_path, reference_text):
     speech_config = speechsdk.SpeechConfig(subscription=SPEECH_KEY, region=SPEECH_REGION)
     speech_config.speech_recognition_language = "en-US" 
     
+    # 1. 採点用
     audio_config_score = speechsdk.audio.AudioConfig(filename=audio_file_path)
     pronunciation_config = speechsdk.PronunciationAssessmentConfig(
         reference_text=reference_text,
@@ -66,9 +78,9 @@ def assess_pronunciation(audio_file_path, reference_text):
 
     recognizer_score = speechsdk.SpeechRecognizer(speech_config=speech_config, audio_config=audio_config_score)
     pronunciation_config.apply_to(recognizer_score)
-    
     result_score = recognizer_score.recognize_once_async().get()
 
+    # 2. 聞き取り用
     audio_config_raw = speechsdk.audio.AudioConfig(filename=audio_file_path)
     recognizer_raw = speechsdk.SpeechRecognizer(speech_config=speech_config, audio_config=audio_config_raw)
     result_raw = recognizer_raw.recognize_once_async().get()
@@ -87,7 +99,7 @@ def generate_tts(text, filename):
 
 # --- UI ---
 st.title("🗣️ AI英語発音コーチ")
-st.info("雑音を読み飛ばし判定にする「低スコアフィルタ」を搭載しました。")
+st.info("判定ロジックを改良し、余計な言葉（挿入）の検出精度を向上させました。")
 
 if 'target_text' not in st.session_state:
     st.session_state.target_text = "I like playing soccer with my friends."
@@ -120,8 +132,8 @@ if audio_value:
         if 'NBest' in data and len(data['NBest']) > 0:
             nbest = data['NBest'][0]
             words_data = nbest.get('Words', [])
-            pron_scores = nbest.get('PronunciationAssessment', {})
             
+            pron_scores = nbest.get('PronunciationAssessment', {})
             acc = pron_scores.get('AccuracyScore', 0)
             flu = pron_scores.get('FluencyScore', 0)
             com = pron_scores.get('CompletenessScore', 0)
@@ -138,34 +150,40 @@ if audio_value:
                     word_text = word_info.get('Word') or word_info.get('DisplayWord') or "???"
                     pron_acc = word_info.get('PronunciationAssessment', {})
                     
-                    # 生の判定データ
-                    raw_error_type = pron_acc.get('ErrorType', 'None')
+                    # ErrorTypeを複数の場所から探す（万が一のため）
+                    raw_error_type = pron_acc.get('ErrorType') or word_info.get('ErrorType') or 'None'
                     accuracy = pron_acc.get('AccuracyScore', 0)
 
-                    # ★★★ ここで判定を上書きするロジック ★★★
-                    # 「Mispronunciation」かつ「40点以下」なら「Omission（読み飛ばし）」とみなす
-                    IGNORE_THRESHOLD = 40
+                    # --- 判定ロジック ---
                     
-                    final_error_type = raw_error_type
-                    if raw_error_type == "Mispronunciation" and accuracy <= IGNORE_THRESHOLD:
-                        final_error_type = "Omission"
+                    # 1. 挿入判定 (Insertion) - 大文字小文字を区別せずチェック
+                    if raw_error_type.lower() == "insertion":
+                        final_error_type = "Insertion"
+                    
+                    # 2. 読み飛ばし判定 (Omission) - 低スコアも含む
+                    else:
+                        IGNORE_THRESHOLD = 40
+                        # 元々Omission、または発音ミスかつスコアが極端に低い場合
+                        if raw_error_type == "Omission" or (raw_error_type == "Mispronunciation" and accuracy <= IGNORE_THRESHOLD):
+                            final_error_type = "Omission"
+                        else:
+                            final_error_type = "Normal"
 
                     # --- 表示ロジック ---
-                    
-                    # 1. 挿入 (Insertion)
+
                     if final_error_type == "Insertion":
+                        # 紫色のカッコ
                         feedback_html_parts.append(f"<span class='word-insertion'>({word_text})</span>")
                     
-                    # 2. 読み飛ばし (Omission または 低スコアのみなしOmission)
                     elif final_error_type == "Omission":
                         total_words_for_score += 1
                         weak_words.append(word_text)
-                        # Omission扱いなので取り消し線
+                        # グレーの取り消し線
                         feedback_html_parts.append(f"<span class='word-omission'>{word_text}</span>")
-
-                    # 3. その他（通常判定）
-                    else:
+                    
+                    else: # Normal
                         total_words_for_score += 1
+                        
                         if accuracy >= 85:
                             css_class = "word-green"
                             green_count += 1
@@ -178,7 +196,7 @@ if audio_value:
                         
                         feedback_html_parts.append(f"<span class='{css_class}' title='{accuracy}点'>{word_text}</span>")
 
-                # --- 結果表示 ---
+                # --- 総合評価 ---
                 if total_words_for_score > 0:
                     green_ratio = (green_count / total_words_for_score) * 100
                 else:
@@ -198,6 +216,7 @@ if audio_value:
                 c3.metric("Completeness", f"{com:.0f}")
 
                 st.divider()
+
                 st.subheader("📝 詳細レポート")
                 
                 st.markdown("##### 👂 聞き取り内容 (Raw Text)")
@@ -247,3 +266,4 @@ if audio_value:
         st.error("音声を認識できませんでした。")
     elif result_obj.reason == speechsdk.ResultReason.Canceled:
         st.error("処理中断。APIキーを確認してください。")
+
