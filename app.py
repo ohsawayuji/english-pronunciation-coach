@@ -207,4 +207,41 @@ if audio_value:
         # --- 🔥 弱点特訓コーナー ---
         if len(weak_words) > 0:
             st.subheader("🔥 弱点特訓コーナー")
-            st.write("赤
+            st.write("赤・黄・グレー（読み飛ばし）の単語を練習しましょう。")
+
+            unique_weak_words = list(dict.fromkeys(weak_words))
+            selected_word = st.selectbox("練習する単語を選択:", unique_weak_words)
+
+            col_a, col_b = st.columns(2)
+            
+            with col_a:
+                st.markdown("##### 👂 ① お手本")
+                if st.button(f"Play: {selected_word}"):
+                    tts_single = get_filename("single_word_tts")
+                    generate_tts(selected_word, tts_single)
+                    st.audio(tts_single)
+            
+            with col_b:
+                st.markdown("##### 🎤 ② 録音")
+                practice_audio = st.audio_input(f"Record: {selected_word}", key="practice_rec")
+                
+                if practice_audio:
+                    practice_file = get_filename("practice")
+                    with open(practice_file, "wb") as f:
+                        f.write(practice_audio.getbuffer())
+                    
+                    p_score, p_raw = assess_pronunciation(practice_file, selected_word)
+                    
+                    if p_score:
+                        single_score = p_score.accuracy_score
+                        if single_score >= 85:
+                            st.success(f"🎉 {single_score:.0f}点 (Excellent!)")
+                        elif single_score >= 75:
+                            st.warning(f"🟡 {single_score:.0f}点 (Good)")
+                        else:
+                            st.error(f"🔴 {single_score:.0f}点 (Try again)")
+        else:
+            st.success("弱点単語はありません！")
+
+    else:
+        st.error("音声を認識できませんでした。")
