@@ -35,13 +35,13 @@ st.markdown("""
     /* 挿入（紫） - AI判定 */
     .word-insertion { color: #6f42c1; font-weight: bold; font-style: italic; margin-left: 2px; margin-right: 8px; }
     
-    /* ゴースト単語（タイムスタンプで検出した無視された単語）- バッジスタイル */
+    /* ゴースト単語（スペル違い/挿入語）- 紫バッジ */
     .word-ghost { 
         color: #fff; 
         background-color: #6f42c1; 
         padding: 2px 6px; 
         border-radius: 4px; 
-        font-size: 0.9em; /* 少し小さくしてバランスを取る */
+        font-size: 0.9em;
         margin-left: 4px;
         margin-right: 4px;
         vertical-align: middle;
@@ -70,15 +70,15 @@ def get_speech_synthesizer():
     return speech_config
 
 def normalize_word(w):
+    if not w: return ""
     return w.lower().translate(str.maketrans('', '', string.punctuation))
 
 def assess_pronunciation(audio_file_path, reference_text):
     speech_config = speechsdk.SpeechConfig(subscription=SPEECH_KEY, region=SPEECH_REGION)
     speech_config.speech_recognition_language = "en-US" 
-    # 詳細なタイムスタンプを取得するためにDetailedフォーマットを指定
     speech_config.output_format = speechsdk.OutputFormat.Detailed
     
-    # 1. 採点用 (Pronunciation Assessment)
+    # 1. 採点用
     audio_config_score = speechsdk.audio.AudioConfig(filename=audio_file_path)
     pronunciation_config = speechsdk.PronunciationAssessmentConfig(
         reference_text=reference_text,
@@ -91,16 +91,14 @@ def assess_pronunciation(audio_file_path, reference_text):
     pronunciation_config.apply_to(recognizer_score)
     result_score = recognizer_score.recognize_once_async().get()
 
-    # 2. 聞き取り用 (Standard Recognition with Detailed Output)
+    # 2. 聞き取り用
     audio_config_raw = speechsdk.audio.AudioConfig(filename=audio_file_path)
     recognizer_raw = speechsdk.SpeechRecognizer(speech_config=speech_config, audio_config=audio_config_raw)
     result_raw = recognizer_raw.recognize_once_async().get()
 
-    # 結果のテキスト抽出
+    raw_text_heard = ""
     if result_raw.reason == speechsdk.ResultReason.RecognizedSpeech:
         raw_text_heard = result_raw.text
-    else:
-        raw_text_heard = ""
 
     return result_score.json, result_raw.json, result_score, raw_text_heard
 
@@ -113,7 +111,7 @@ def generate_tts(text, filename):
 
 # --- UI ---
 st.title("🗣️ AI英語発音コーチ")
-st.info("タイムスタンプ解析により、余計な言葉を「発言した場所」に正確に表示します。")
+st.info("判定強化：likeとlikes、friendとfriendsなどの違いも検知し、紫タグで表示します。")
 
 if 'target_text' not in st.session_state:
     st.session_state.target_text = "I like playing soccer with my friends."
@@ -138,14 +136,13 @@ if audio_value:
         f.write(audio_value.getbuffer())
 
     with st.spinner("AIが分析中..."):
-        # 戻り値を変更: score_json, raw_json, result_obj, raw_text
         json_str_score, json_str_raw, result_obj, raw_text_heard = assess_pronunciation(input_filename, target_text)
 
     if result_obj.reason == speechsdk.ResultReason.RecognizedSpeech:
         data_score = json.loads(json_str_score)
         data_raw = json.loads(json_str_raw)
         
-        # Pronunciation Assessmentの結果取得
+        # 1. Assessmentデータの取得
         if 'NBest' in data_score and len(data_score['NBest']) > 0:
             nbest_score = data_score['NBest'][0]
             words_score = nbest_score.get('Words', [])
@@ -158,23 +155,19 @@ if audio_value:
             words_score = []
             acc, flu, com = 0, 0, 0
 
-        # Raw Recognitionの結果取得 (Detailedフォーマット)
+        # 2. Raw Recognitionデータの取得
         words_raw = []
         if 'NBest' in data_raw and len(data_raw['NBest']) > 0:
-            # Detailed formatのNBest[0]にはWordsリストがあることが多い
             words_raw = data_raw['NBest'][0].get('Words', [])
         
-        # --- 統合表示ロジック (Timeline Merge) ---
-        
-        # 全ての表示要素をこのリストに入れて、最後にOffsetでソートする
-        # 要素: {'text': str, 'html': str, 'offset': int, 'type': str, 'debug_info': dict}
+        # --- 統合表示ロジック ---
         display_items = []
         
         total_words_for_score = 0
         green_count = 0
         weak_words = []
         
-        # 1. 採点結果（Assessment）の単語をリストに追加
+        # A. 採点結果（Assessment）をリストに追加
         for w in words_score:
             word_text = w.get('Word') or w.get('DisplayWord') or "???"
             offset = w.get('Offset', 0)
@@ -184,13 +177,11 @@ if audio_value:
             raw_error = pron_acc.get('ErrorType') or w.get('ErrorType') or 'None'
             score = pron_acc.get('AccuracyScore', 0)
             
-            # 判定ロジック
             final_error = "Normal"
             html = ""
             
             if raw_error.lower() == "insertion":
                 final_error = "Insertion"
-                # AIが検出した普通の挿入はカッコ書き
                 html = f"<span class='word-insertion'>({word_text})</span>"
             elif raw_error == "Omission":
                 total_words_for_score += 1
@@ -203,7 +194,6 @@ if audio_value:
                 final_error = "Low Score -> Omission"
                 html = f"<span class='word-omission'>{word_text}</span>"
             else:
-                # Normal or Scored
                 total_words_for_score += 1
                 if score >= 85:
                     css = "word-green"
@@ -230,50 +220,61 @@ if audio_value:
                 'score': score
             })
 
-        # 2. Raw認識（聞き取り）にあるが、採点結果の時間帯と被らない単語を「Ghost」として追加
-        # (Assessmentの単語と時間的に重なっているRaw単語は「同一」とみなして無視する)
+        # B. Raw認識（聞き取り）の処理
+        # 「時間が重なっていても、単語のスペルが違えば表示する」ロジックへ変更
         
         for r_w in words_raw:
             r_text = r_w.get('Word') or r_w.get('DisplayWord')
             r_offset = r_w.get('Offset', 0)
             r_duration = r_w.get('Duration', 0)
-            r_end = r_offset + r_duration
             
-            # 重なりチェック
-            is_overlapped = False
+            # チェック処理
+            should_add_as_ghost = True
+            
             for item in display_items:
                 if item['source'] == 'assessment':
-                    # 判定側単語の開始・終了
+                    # 1. 時間の重なりを判定
                     a_start = item['offset']
                     a_end = item['offset'] + item['duration']
-                    
-                    # 簡易的な衝突判定
                     r_center = r_offset + (r_duration / 2)
-                    if a_start <= r_center <= a_end:
-                        is_overlapped = True
-                        break
+                    
+                    is_overlapped = (a_start <= r_center <= a_end)
+                    
+                    if is_overlapped:
+                        # 2. 重なっている場合、単語が「同じ」か「違う」か判定
+                        norm_target = normalize_word(item['text'])
+                        norm_raw = normalize_word(r_text)
+                        
+                        if norm_target == norm_raw:
+                            # 完全に一致する単語なら、Assessment側ですでに表示しているのでRawは無視
+                            should_add_as_ghost = False
+                            break
+                        else:
+                            # ★ここが重要★
+                            # 重なっているが単語が違う (friend vs friends, like vs likes)
+                            # -> この場合、Raw側の単語は「言い間違い（Ghost）」として表示対象に残す！
+                            # ただし、ループは抜けない（他の単語との重なりも見るためではないが、
+                            # ひとつのAssessment単語に対しての判定はここで完了）
+                            pass
             
-            if not is_overlapped:
-                # 重なっていない＝AIが無視した挿入語 (Ghost)
+            if should_add_as_ghost:
                 if normalize_word(r_text): 
-                    # ★修正点：「Ghost: 」を削除し、単語のみを表示★
                     display_items.append({
                         'text': r_text,
                         'html': f"<span class='word-ghost'>{r_text}</span>",
-                        'offset': r_offset,
+                        'offset': r_offset + 1, # 並び順で元の単語の後ろに来るよう微調整
                         'duration': r_duration,
                         'source': 'raw_ghost',
-                        'debug_raw': 'Not in JSON',
-                        'debug_final': 'Ghost Insertion',
+                        'debug_raw': 'Mismatch/Insertion',
+                        'debug_final': 'Ghost (Diff)',
                         'score': '-'
                     })
 
         # 3. オフセット順にソートしてHTML生成
         display_items.sort(key=lambda x: x['offset'])
-        
         final_html_parts = [item['html'] for item in display_items]
         
-        # --- 結果表示計算 ---
+        # --- 結果表示 ---
         if total_words_for_score > 0:
             green_ratio = (green_count / total_words_for_score) * 100
         else:
@@ -298,30 +299,27 @@ if audio_value:
         st.markdown("##### 👂 聞き取り内容")
         st.info(f"「 {raw_text_heard} 」")
 
-        st.markdown("##### 📊 添削結果 (タイムライン同期)")
+        st.markdown("##### 📊 添削結果 (スペル不一致も表示)")
         final_html = "".join(final_html_parts)
         st.markdown(f"<div class='correction-box'>{final_html}</div>", unsafe_allow_html=True)
-        # 凡例も修正
-        st.caption("凡例: 🟢OK 🔴NG 🔘取り消し線(読み飛ばし) 🟣紫バッジ(AIが無視した余計な単語)")
+        st.caption("凡例: 🟢OK 🔴NG 🔘取り消し線(読み飛ばし/不一致元) 🟣紫バッジ(実際に言った単語/挿入語)")
 
         st.markdown("---")
         st.subheader("🧐 判定ロジック診断テーブル")
         
-        # 診断用データ作成
         debug_data = []
         for item in display_items:
             debug_data.append({
-                "順序(Offset)": item['offset'],
+                "順序": item['offset'],
                 "単語": item['text'],
                 "ソース": item['source'],
                 "判定": item['debug_final'],
-                "Score": item['score']
             })
         st.dataframe(pd.DataFrame(debug_data))
 
         st.divider()
-
-        # --- 弱点特訓 ---
+        
+        # 弱点特訓セクションは変更なし（省略せず記述）
         if len(weak_words) > 0:
             st.subheader("🔥 弱点特訓コーナー")
             unique_weak_words = [w for w in list(dict.fromkeys(weak_words)) if w != "???"]
@@ -338,7 +336,6 @@ if audio_value:
                     if pa:
                         pf = get_filename("practice")
                         with open(pf, "wb") as f: f.write(pa.getbuffer())
-                        # 練習モードでは簡易呼び出し
                         _, _, pr, _ = assess_pronunciation(pf, selected_word) 
                         if pr.reason == speechsdk.ResultReason.RecognizedSpeech:
                             s = speechsdk.PronunciationAssessmentResult(pr).accuracy_score
@@ -346,15 +343,16 @@ if audio_value:
                             elif s >= 75: st.warning(f"🟡 {s:.0f}点")
                             else: st.error(f"🔴 {s:.0f}点")
         else:
-            st.error("解析失敗")
-            
-        with st.expander("🛠️ 開発用データ確認 (Raw JSON)"):
-            st.write("Score JSON:")
-            st.json(data_score)
-            st.write("Raw Recognition JSON:")
-            st.json(data_raw)
+            st.success("Weak wordsなし")
+
+        with st.expander("🛠️ 開発用データ確認"):
+            st.write("Words (Assessment):")
+            st.json(words_score)
+            st.write("Words (Raw):")
+            st.json(words_raw)
 
     elif result_obj.reason == speechsdk.ResultReason.NoMatch:
         st.error("音声を認識できませんでした。")
     elif result_obj.reason == speechsdk.ResultReason.Canceled:
         st.error("処理中断。APIキーを確認してください。")
+
