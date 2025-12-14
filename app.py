@@ -35,17 +35,18 @@ st.markdown("""
     /* 挿入（紫） - AI判定 */
     .word-insertion { color: #6f42c1; font-weight: bold; font-style: italic; margin-left: 2px; margin-right: 8px; }
     
-    /* ゴースト単語（タイムスタンプで検出した無視された単語） */
+    /* ゴースト単語（タイムスタンプで検出した無視された単語）- バッジスタイル */
     .word-ghost { 
         color: #fff; 
         background-color: #6f42c1; 
         padding: 2px 6px; 
         border-radius: 4px; 
-        font-size: 0.8em;
-        margin-left: 2px;
-        margin-right: 8px;
+        font-size: 0.9em; /* 少し小さくしてバランスを取る */
+        margin-left: 4px;
+        margin-right: 4px;
         vertical-align: middle;
         font-style: italic;
+        font-weight: bold;
     }
 </style>
 """, unsafe_allow_html=True)
@@ -189,6 +190,7 @@ if audio_value:
             
             if raw_error.lower() == "insertion":
                 final_error = "Insertion"
+                # AIが検出した普通の挿入はカッコ書き
                 html = f"<span class='word-insertion'>({word_text})</span>"
             elif raw_error == "Omission":
                 total_words_for_score += 1
@@ -245,8 +247,7 @@ if audio_value:
                     a_start = item['offset']
                     a_end = item['offset'] + item['duration']
                     
-                    # 簡易的な衝突判定: 時間が大幅に重なっていれば同一単語とみなす
-                    # (厳密には交差判定だが、ここでは中心点が相手の区間にあるかで判定)
+                    # 簡易的な衝突判定
                     r_center = r_offset + (r_duration / 2)
                     if a_start <= r_center <= a_end:
                         is_overlapped = True
@@ -254,12 +255,12 @@ if audio_value:
             
             if not is_overlapped:
                 # 重なっていない＝AIが無視した挿入語 (Ghost)
-                # ただし、句読点などは除外したいが、DisplayWordには含まれることがある
                 if normalize_word(r_text): 
+                    # ★修正点：「Ghost: 」を削除し、単語のみを表示★
                     display_items.append({
                         'text': r_text,
-                        'html': f"<span class='word-ghost'>Ghost: {r_text}</span>",
-                        'offset': r_offset, # 正しい時間の位置に配置
+                        'html': f"<span class='word-ghost'>{r_text}</span>",
+                        'offset': r_offset,
                         'duration': r_duration,
                         'source': 'raw_ghost',
                         'debug_raw': 'Not in JSON',
@@ -300,7 +301,8 @@ if audio_value:
         st.markdown("##### 📊 添削結果 (タイムライン同期)")
         final_html = "".join(final_html_parts)
         st.markdown(f"<div class='correction-box'>{final_html}</div>", unsafe_allow_html=True)
-        st.caption("凡例: 🟢OK 🔴NG 🔘取り消し線(読み飛ばし) 🟣(Ghost: AIが無視した単語を時間位置に復元)")
+        # 凡例も修正
+        st.caption("凡例: 🟢OK 🔴NG 🔘取り消し線(読み飛ばし) 🟣紫バッジ(AIが無視した余計な単語)")
 
         st.markdown("---")
         st.subheader("🧐 判定ロジック診断テーブル")
