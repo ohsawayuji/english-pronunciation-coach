@@ -1,0 +1,220 @@
+import streamlit as st
+import azure.cognitiveservices.speech as speechsdk
+import os
+import time
+
+# --- 設定 ---
+# GitHubに上げるため、直接キーを書かず st.secrets から読み込むようにします
+try:
+    SPEECH_KEY = st.secrets["SPEECH_KEY"]
+    SPEECH_REGION = st.secrets["SPEECH_REGION"]
+except:
+    st.error("設定エラー: APIキーが設定されていません。") 
+
+def get_speech_synthesizer():
+    """お手本音声を再生するためのSynthesizerを作成"""
+    speech_config = speechsdk.SpeechConfig(subscription=SPEECH_KEY, region=SPEECH_REGION)
+    speech_config.speech_synthesis_voice_name = "en-US-JennyNeural" 
+    return speech_config
+
+def assess_pronunciation(audio_file_path, reference_text):
+    """Azure Speech SDKを使って発音評価を行う関数"""
+    speech_config = speechsdk.SpeechConfig(subscription=SPEECH_KEY, region=SPEECH_REGION)
+    speech_config.speech_recognition_language = "en-US" 
+    audio_config = speechsdk.audio.AudioConfig(filename=audio_file_path)
+
+    # リズム判定OFF
+    pronunciation_config = speechsdk.PronunciationAssessmentConfig(
+        reference_text=reference_text,
+        grading_system=speechsdk.PronunciationAssessmentGradingSystem.HundredMark,
+        granularity=speechsdk.PronunciationAssessmentGranularity.Phoneme
+    )
+    pronunciation_config.enable_miscue = True
+
+    recognizer = speechsdk.SpeechRecognizer(speech_config=speech_config, audio_config=audio_config)
+    pronunciation_config.apply_to(recognizer)
+
+    result = recognizer.recognize_once_async().get()
+    
+    if result.reason == speechsdk.ResultReason.RecognizedSpeech:
+        pronunciation_result = speechsdk.PronunciationAssessmentResult(result)
+        return pronunciation_result, result
+    else:
+        return None, None
+
+def generate_tts(text, filename="output_tts.wav"):
+    """指定されたテキストを音声ファイルに変換する"""
+    speech_config = get_speech_synthesizer()
+    audio_config = speechsdk.audio.AudioConfig(filename=filename)
+    synthesizer = speechsdk.SpeechSynthesizer(speech_config=speech_config, audio_config=audio_config)
+    result = synthesizer.speak_text_async(text).get()
+    return result
+
+# --- 画面（UI）の構築 ---
+st.title("🗣️ AI英語発音コーチ")
+st.info("読み飛ばした単語はグレーの取り消し線で表示されます。")
+
+# 1. 課題文の入力
+if 'target_text' not in st.session_state:
+    st.session_state.target_text = "I like playing soccer with my friends."
+
+target_text = st.text_area("読む英文を入力:", st.session_state.target_text, key="input_text")
+
+# --- ★追加機能：ステップ1 お手本再生 ---
+st.markdown("##### ステップ1：お手本を確認する")
+if st.button("🔊 お手本を聞く (Play Model Audio)"):
+    with st.spinner("音声を生成中..."):
+        tts_file = "model_reference.wav"
+        generate_tts(target_text, tts_file)
+        st.audio(tts_file, format="audio/wav")
+
+st.divider()
+
+# --- ステップ2：録音 ---
+st.markdown("##### ステップ2：録音して採点")
+audio_value = st.audio_input("録音ボタンを押して全文を読む")
+
+if audio_value:
+    with open("temp_input.wav", "wb") as f:
+        f.write(audio_value.getbuffer())
+
+    with st.spinner("AIが分析中..."):
+        score_result, raw_result = assess_pronunciation("temp_input.wav", target_text)
+
+    if score_result:
+        # --- 集計ロジック ---
+        words = speechsdk.PronunciationAssessmentResult(raw_result).words
+        total_words = 0
+        green_count = 0
+        
+        # 苦手・読み飛ばしリスト（練習用）
+        weak_words = []
+        word_details = []
+        
+        for word in words:
+            # 挿入誤り（余計な言葉）以外をカウント対象にする
+            if word.error_type != "Insertion":
+                total_words += 1
+                
+                error_type_str = str(word.error_type)
+                
+                # ★ 色と判定を決める
+                if "Omission" in error_type_str:
+                    # 読み飛ばし
+                    color = "gray"
+                    weak_words.append(word.word)
+                    display_score = "-"
+                elif word.accuracy_score >= 85:
+                    # 合格
+                    color = "green"
+                    green_count += 1
+                    display_score = f"{word.accuracy_score:.0f}"
+                elif word.accuracy_score >= 75:
+                    # 惜しい
+                    color = "#FFC107" # 黄色
+                    weak_words.append(word.word)
+                    display_score = f"{word.accuracy_score:.0f}"
+                else:
+                    # 不合格
+                    color = "red"
+                    weak_words.append(word.word)
+                    display_score = f"{word.accuracy_score:.0f}"
+                
+                word_details.append({
+                    "word": word.word,
+                    "score": display_score,
+                    "color": color,
+                    "error": error_type_str
+                })
+
+        # 合格率計算
+        if total_words > 0:
+            green_ratio = (green_count / total_words) * 100
+        else:
+            green_ratio = 0
+
+        # --- 結果表示 ---
+        if green_ratio >= 85:
+            st.balloons()
+            st.success(f"🎉 合格！ 緑率: {green_ratio:.1f}%")
+        elif green_ratio >= 75:
+            st.warning(f"⚠️ 仮合格。 緑率: {green_ratio:.1f}%")
+        else:
+            st.error(f"❌ 不合格。 緑率: {green_ratio:.1f}%")
+
+        # 3つの指標
+        acc = score_result.accuracy_score if score_result.accuracy_score is not None else 0
+        flu = score_result.fluency_score if score_result.fluency_score is not None else 0
+        com = score_result.completeness_score if score_result.completeness_score is not None else 0
+        
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Accuracy", f"{acc:.0f}")
+        c2.metric("Fluency", f"{flu:.0f}")
+        c3.metric("Completeness", f"{com:.0f}")
+
+        st.divider()
+
+        # --- 📝 詳細レポート（色分け表示） ---
+        st.subheader("📝 詳細レポート")
+        feedback_html = ""
+        
+        for item in word_details:
+            if "Omission" in item["error"]:
+                # ★ グレー＆取り消し線を適用
+                feedback_html += f"<span style='color:#b0b0b0; text-decoration:line-through; font-size:24px; margin-right:8px;'>{item['word']}</span> "
+            else:
+                # 通常の色分け（緑・黄・赤）
+                feedback_html += f"<span style='color:{item['color']}; font-size:24px; font-weight:bold; margin-right:8px;' title='{item['score']}点'>{item['word']}</span> "
+        
+        # 挿入誤り（余計な発言）の表示
+        for word in words:
+            if word.error_type == "Insertion":
+                 feedback_html += f"<span style='color:purple; font-style:italic; font-size:18px;'>({word.word}?)</span> "
+
+        st.markdown(feedback_html, unsafe_allow_html=True)
+        
+        st.caption("凡例: 🟢完璧  🟡惜しい  🔴ダメ  🔘グレー(読み飛ばし)")
+
+        st.divider()
+
+        # --- 🔥 弱点特訓コーナー ---
+        if len(weak_words) > 0:
+            st.subheader("🔥 弱点特訓コーナー")
+            st.write("赤・黄・グレー（読み飛ばし）の単語を練習しましょう。")
+
+            # 重複を削除してリスト化
+            unique_weak_words = list(dict.fromkeys(weak_words))
+            selected_word = st.selectbox("練習する単語を選択:", unique_weak_words)
+
+            col_a, col_b = st.columns(2)
+            
+            with col_a:
+                st.markdown("##### 👂 ① お手本")
+                if st.button(f"Play: {selected_word}"):
+                    tts_filename = "temp_tts.wav"
+                    generate_tts(selected_word, tts_filename)
+                    st.audio(tts_filename)
+            
+            with col_b:
+                st.markdown("##### 🎤 ② 録音")
+                practice_audio = st.audio_input(f"Record: {selected_word}", key="practice_rec")
+                
+                if practice_audio:
+                    with open("temp_practice.wav", "wb") as f:
+                        f.write(practice_audio.getbuffer())
+                    
+                    p_score, p_raw = assess_pronunciation("temp_practice.wav", selected_word)
+                    
+                    if p_score:
+                        single_score = p_score.accuracy_score
+                        if single_score >= 85:
+                            st.success(f"🎉 {single_score:.0f}点 (Excellent!)")
+                        elif single_score >= 75:
+                            st.warning(f"🟡 {single_score:.0f}点 (Good)")
+                        else:
+                            st.error(f"🔴 {single_score:.0f}点 (Try again)")
+        else:
+            st.success("弱点単語はありません！")
+
+    else:
+        st.error("音声を認識できませんでした。")
