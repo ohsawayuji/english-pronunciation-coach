@@ -78,6 +78,13 @@ def assess_pronunciation(audio_file_path, reference_text):
     speech_config.speech_recognition_language = "en-US" 
     speech_config.output_format = speechsdk.OutputFormat.Detailed
     
+    # ★★★ ここが重要：沈黙タイムアウトの延長設定 ★★★
+    # 3000ms(3秒)以上の沈黙がないと切らない設定（デフォルトはもっと短い）
+    # これにより、言い淀みや長いポーズがあっても、AIは「まだ続きがある」と判断して待ちます。
+    speech_config.set_property(speechsdk.PropertyId.Speech_SegmentationSilenceTimeoutMs, "5000")
+    speech_config.set_property(speechsdk.PropertyId.SpeechServiceConnection_EndSilenceTimeoutMs, "5000")
+    speech_config.set_property(speechsdk.PropertyId.SpeechServiceConnection_InitialSilenceTimeoutMs, "5000")
+    
     # 1. 採点用
     audio_config_score = speechsdk.audio.AudioConfig(filename=audio_file_path)
     pronunciation_config = speechsdk.PronunciationAssessmentConfig(
@@ -111,7 +118,7 @@ def generate_tts(text, filename):
 
 # --- UI ---
 st.title("🗣️ AI英語発音コーチ")
-st.info("判定強化：スペル不一致（like⇔likes等）の場合、発音が良くても強制的に減点表示（黄色/赤）にします。")
+st.info("長文・言い淀み対策：5秒程度の沈黙ならAIが録音を切らずに待ち続けるように設定しました。")
 
 if 'target_text' not in st.session_state:
     st.session_state.target_text = "I like playing soccer with my friends."
@@ -177,34 +184,28 @@ if audio_value:
             raw_error = pron_acc.get('ErrorType') or w.get('ErrorType') or 'None'
             score = pron_acc.get('AccuracyScore', 0)
             
-            # ★★★ 強制減点ロジック (Penalty Check) ★★★
-            # 実際に発音された単語(Raw)と重なるかチェックし、スペルが違う場合はスコアを強制的に下げる
+            # ペナルティチェック
             penalty_applied = False
-            overlap_word = ""
+            debug_note = ""
 
             for r_w in words_raw:
                 r_offset = r_w.get('Offset', 0)
                 r_duration = r_w.get('Duration', 0)
                 r_center = r_offset + (r_duration / 2)
                 
-                # Assessment単語の範囲内か？
                 a_start = offset
                 a_end = offset + duration
                 
                 if a_start <= r_center <= a_end:
-                    # 重なっている
                     r_text = r_w.get('Word') or r_w.get('DisplayWord')
                     if normalize_word(word_text) != normalize_word(r_text):
                         penalty_applied = True
-                        overlap_word = r_text
-                    break # 1つ見つかれば判定終了
+                    break 
             
-            # スコア操作
-            debug_note = ""
             if penalty_applied:
                 if score >= 85:
-                    score = 80 # 強制的に黄色(84以下)にする
-                    debug_note = " (Penalty Applied)"
+                    score = 80 # 強制減点
+                    debug_note = " (Penalty)"
             
             # 判定ロジック
             final_error = "Normal"
@@ -218,7 +219,7 @@ if audio_value:
                 weak_words.append(word_text)
                 final_error = "Omission"
                 html = f"<span class='word-omission'>{word_text}</span>"
-            elif raw_error == "Mispronunciation" and score <= 40: # 元スコアが低い場合
+            elif raw_error == "Mispronunciation" and score <= 40:
                 total_words_for_score += 1
                 weak_words.append(word_text)
                 final_error = "Low Score -> Omission"
@@ -265,17 +266,12 @@ if audio_value:
                     r_center = r_offset + (r_duration / 2)
                     
                     if a_start <= r_center <= a_end:
-                        # 重なっている場合
                         norm_target = normalize_word(item['text'])
                         norm_raw = normalize_word(r_text)
                         
                         if norm_target == norm_raw:
-                            # 完全一致ならGhost表示不要
                             should_add_as_ghost = False
                             break
-                        else:
-                            # 不一致ならGhost表示（例: Target(Yellow) + Ghost(Purple)）
-                            pass
             
             if should_add_as_ghost:
                 if normalize_word(r_text): 
@@ -290,7 +286,6 @@ if audio_value:
                         'score': '-'
                     })
 
-        # 3. オフセット順にソートしてHTML生成
         display_items.sort(key=lambda x: x['offset'])
         final_html_parts = [item['html'] for item in display_items]
         
@@ -340,7 +335,6 @@ if audio_value:
 
         st.divider()
         
-        # 弱点特訓セクション
         if len(weak_words) > 0:
             st.subheader("🔥 弱点特訓コーナー")
             unique_weak_words = [w for w in list(dict.fromkeys(weak_words)) if w != "???"]
@@ -376,5 +370,3 @@ if audio_value:
         st.error("音声を認識できませんでした。")
     elif result_obj.reason == speechsdk.ResultReason.Canceled:
         st.error("処理中断。APIキーを確認してください。")
-
-
