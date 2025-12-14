@@ -40,6 +40,7 @@ def assess_pronunciation(audio_file_path, reference_text):
     speech_config.speech_recognition_language = "en-US" 
     audio_config = speechsdk.audio.AudioConfig(filename=audio_file_path)
 
+    # enable_miscue=True が重要（言い間違い・飛ばし・挿入を検知）
     pronunciation_config = speechsdk.PronunciationAssessmentConfig(
         reference_text=reference_text,
         grading_system=speechsdk.PronunciationAssessmentGradingSystem.HundredMark,
@@ -100,61 +101,71 @@ if audio_value:
 
     if score_result:
         words = speechsdk.PronunciationAssessmentResult(raw_result).words
-        total_words = 0
-        green_count = 0
-        weak_words = []
-        word_details = []
         
-        # ★追加：実際に認識された単語リストを作成するための変数
-        recognized_words_list = []
+        # 変数初期化
+        total_words_for_score = 0
+        green_count = 0
+        weak_words = []      # 練習用リスト
+        
+        # 表示用データ
+        feedback_html_parts = []     # 詳細レポート（色付き）用
+        heard_words_list = []        # 「聞こえた音」再現用
 
+        # --- 判定ループ ---
         for word in words:
-            error_type_str = str(word.error_type)
+            error_type = word.error_type
             
-            # --- 1. 実際に認識された文章を作るロジック ---
-            # 「読み飛ばし(Omission)」以外は、発声された言葉なのでリストに追加
-            if "Omission" not in error_type_str:
-                recognized_words_list.append(word.word)
+            # --- A. 「聞こえた音」リストの作成 ---
+            # Omission（読み飛ばし）以外は、口から発せられた音なのでリストに入れる
+            if error_type != speechsdk.PronunciationAssessmentErrorType.Omission:
+                heard_words_list.append(word.word)
+
+            # --- B. 採点と色分け ---
             
-            # --- 2. 採点ロジック ---
-            if word.error_type != "Insertion":
-                total_words += 1
+            # 1. 挿入誤り（Insertion）: 余計な単語
+            if error_type == speechsdk.PronunciationAssessmentErrorType.Insertion:
+                # 採点の分母には含めないが、表示は紫にする
+                feedback_html_parts.append(
+                    f"<span style='color:purple; font-style:italic; font-size:18px;'>({word.word})</span>"
+                )
+                # 挿入された語も練習候補に入れたければここに追加（今回は除外）
+            
+            # 2. 読み飛ばし（Omission）: 言わなかった単語
+            elif error_type == speechsdk.PronunciationAssessmentErrorType.Omission:
+                total_words_for_score += 1
+                weak_words.append(word.word)
+                feedback_html_parts.append(
+                    f"<span style='color:#b0b0b0; text-decoration:line-through; font-size:24px; margin-right:5px;'>{word.word}</span>"
+                )
+
+            # 3. その他の通常判定（None, Mispronunciation）
+            else:
+                total_words_for_score += 1
                 
-                if "Omission" in error_type_str:
-                    color = "gray"
-                    weak_words.append(word.word)
-                    display_score = "-"
-                elif word.accuracy_score >= 85:
+                # スコアによる色分け
+                if word.accuracy_score >= 85:
                     color = "green"
                     green_count += 1
-                    display_score = f"{word.accuracy_score:.0f}"
                 elif word.accuracy_score >= 75:
-                    color = "#FFC107"
+                    color = "#FFC107" # 黄色
                     weak_words.append(word.word)
-                    display_score = f"{word.accuracy_score:.0f}"
                 else:
                     color = "red"
                     weak_words.append(word.word)
-                    display_score = f"{word.accuracy_score:.0f}"
                 
-                word_details.append({
-                    "word": word.word,
-                    "score": display_score,
-                    "color": color,
-                    "error": error_type_str
-                })
-        
-        # 認識された文章を結合
-        recognized_sentence = " ".join(recognized_words_list)
+                feedback_html_parts.append(
+                    f"<span style='color:{color}; font-size:24px; font-weight:bold; margin-right:5px;' title='{word.accuracy_score:.0f}点'>{word.word}</span>"
+                )
 
-        if total_words > 0:
-            green_ratio = (green_count / total_words) * 100
+        # --- 集計 ---
+        recognized_sentence = " ".join(heard_words_list) # リストを文字列に変換
+        
+        if total_words_for_score > 0:
+            green_ratio = (green_count / total_words_for_score) * 100
         else:
             green_ratio = 0
 
-        # --- 結果表示エリア ---
-        
-        # 合否メッセージ
+        # --- 結果表示 ---
         if green_ratio >= 85:
             st.balloons()
             st.success(f"🎉 Excellent! 合格です！ (緑率: {green_ratio:.1f}%)")
@@ -163,7 +174,6 @@ if audio_value:
         else:
             st.error(f"❌ Try Again. 緑を増やしましょう。 (緑率: {green_ratio:.1f}%)")
 
-        # 3つの指標
         acc = score_result.accuracy_score if score_result.accuracy_score else 0
         flu = score_result.fluency_score if score_result.fluency_score else 0
         com = score_result.completeness_score if score_result.completeness_score else 0
@@ -175,30 +185,20 @@ if audio_value:
 
         st.divider()
 
-        # --- ★ここが新機能：AIが聞き取った内容の表示 ---
+        # --- 📝 詳細レポート ---
         st.subheader("📝 詳細レポート")
         
+        # 👂 実際に聞こえた文章
         st.markdown("##### 👂 AIが聞き取った内容")
-        if recognized_sentence.strip() == "":
-            st.info("（何も聞き取れませんでした）")
+        if not recognized_sentence:
+             st.info("（音声が検出されませんでした）")
         else:
-            st.info(f"「 {recognized_sentence} 」")
-            st.caption("※ 読み飛ばした単語はここに含まれず、余計に読んだ単語はここに含まれます。")
+             # ここに「soccer soccer」や「soccer game」などがそのまま表示されます
+             st.info(f"「 {recognized_sentence} 」")
 
-        st.markdown("##### 📊 採点と添削")
-        feedback_html = "<div style='line-height: 2.0;'>"
-        for item in word_details:
-            if "Omission" in item["error"]:
-                feedback_html += f"<span style='color:#b0b0b0; text-decoration:line-through; font-size:24px; margin-right:8px;'>{item['word']}</span> "
-            else:
-                feedback_html += f"<span style='color:{item['color']}; font-size:24px; font-weight:bold; margin-right:8px;' title='{item['score']}点'>{item['word']}</span> "
-        
-        for word in words:
-            if word.error_type == "Insertion":
-                 feedback_html += f"<span style='color:purple; font-style:italic; font-size:18px;'>({word.word}?)</span> "
-        
-        feedback_html += "</div>"
-
+        # 📊 添削結果
+        st.markdown("##### 📊 添削結果")
+        feedback_html = "<div style='line-height: 2.0;'>" + " ".join(feedback_html_parts) + "</div>"
         st.markdown(feedback_html, unsafe_allow_html=True)
         st.caption("凡例: 🟢完璧  🟡惜しい  🔴発音NG  🔘読み飛ばし  (🟣余計な単語)")
 
@@ -245,4 +245,3 @@ if audio_value:
 
     else:
         st.error("音声を認識できませんでした。")
-
