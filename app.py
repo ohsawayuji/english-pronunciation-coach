@@ -143,13 +143,9 @@ if audio_value:
             for word_info in words_data:
                 word_text = word_info.get('Word', '')
                 
-                # ★修正ポイント：PronunciationAssessmentオブジェクトの中から値を取得する
+                # 正しい階層からスコアを取得
                 pron_acc = word_info.get('PronunciationAssessment', {})
-                
-                # ErrorTypeを取得 (デフォルトはNone)
                 error_type = pron_acc.get('ErrorType', 'None')
-                
-                # AccuracyScoreを取得 (デフォルトは0)
                 accuracy = pron_acc.get('AccuracyScore', 0)
 
                 # --- ケース1: 余計な単語 (Insertion) ---
@@ -199,4 +195,83 @@ if audio_value:
             else:
                 st.error(f"❌ Try Again. 緑を増やしましょう。 (緑率: {green_ratio:.1f}%)")
 
-            c1, c2, c3 = st.
+            # ★ここがエラー箇所の修正版です★
+            c1, c2, c3 = st.columns(3)
+            c1.metric("Accuracy (正確さ)", f"{acc:.0f}")
+            c2.metric("Fluency (流暢さ)", f"{flu:.0f}")
+            c3.metric("Completeness (完全性)", f"{com:.0f}")
+
+            st.divider()
+
+            # --- 📝 詳細レポート ---
+            st.subheader("📝 詳細レポート")
+            
+            st.markdown("##### 👂 AIが聞き取った内容 (Raw Text)")
+            if not raw_text_heard:
+                st.info("（音声が検出されませんでした）")
+            else:
+                st.info(f"「 {raw_text_heard} 」")
+                st.caption("※ ここには、あなたの発音がそのまま文字になって表示されます。")
+
+            st.markdown("##### 📊 添削結果 (Correction)")
+            
+            feedback_html = f"<div class='correction-box'>{''.join(feedback_html_parts)}</div>"
+            st.markdown(feedback_html, unsafe_allow_html=True)
+            
+            st.markdown("""
+            <small>
+            <b>凡例:</b><br>
+            🟢 緑 = OK (Excellent)<br>
+            🔴 赤 = 発音NG (Try again)<br>
+            🔘 <span style='color:#b0b0b0; text-decoration:line-through;'>取り消し線</span> = 読み飛ばした単語 (Omission)<br>
+            🟣 <span style='color:#6f42c1; font-style: italic; font-weight: bold;'>(カッコ)</span> = 余計な単語 (Insertion)<br>
+            ※ <b>単語の言い間違い</b>は、「<span style='color:#b0b0b0; text-decoration:line-through;'>元の単語</span> <span style='color:#6f42c1; font-style: italic; font-weight: bold;'>(言った単語)</span>」のように並んで表示されます。<br>
+            </small>
+            """, unsafe_allow_html=True)
+
+            st.divider()
+
+            # --- 🔥 弱点特訓コーナー ---
+            if len(weak_words) > 0:
+                st.subheader("🔥 弱点特訓コーナー")
+                st.write("不合格だった単語（赤・黄）や、読み飛ばした単語（グレー）を練習しましょう。")
+
+                unique_weak_words = list(dict.fromkeys(weak_words))
+                selected_word = st.selectbox("練習する単語を選択:", unique_weak_words)
+
+                col_a, col_b = st.columns(2)
+                
+                with col_a:
+                    st.markdown("##### 👂 ① お手本")
+                    if st.button(f"Play: {selected_word}"):
+                        tts_single = get_filename("single_word_tts")
+                        generate_tts(selected_word, tts_single)
+                        st.audio(tts_single)
+                
+                with col_b:
+                    st.markdown("##### 🎤 ② 録音")
+                    practice_audio = st.audio_input(f"Record: {selected_word}", key="practice_rec")
+                    
+                    if practice_audio:
+                        practice_file = get_filename("practice")
+                        with open(practice_file, "wb") as f:
+                            f.write(practice_audio.getbuffer())
+                        
+                        _, _, p_result = assess_pronunciation(practice_file, selected_word)
+                        
+                        if p_result.reason == speechsdk.ResultReason.RecognizedSpeech:
+                            p_assess = speechsdk.PronunciationAssessmentResult(p_result)
+                            single_score = p_assess.accuracy_score
+                            
+                            if single_score >= 85:
+                                st.success(f"🎉 {single_score:.0f}点 (Excellent!)")
+                            elif single_score >= 75:
+                                st.warning(f"🟡 {single_score:.0f}点 (Good)")
+                            else:
+                                st.error(f"🔴 {single_score:.0f}点 (Try again)")
+            else:
+                st.success("弱点単語はありません！")
+        else:
+            st.error("データの解析に失敗しました (NBest empty)。")
+    else:
+        st.error("音声を認識できませんでした。マイクの調子を確認してください。")
