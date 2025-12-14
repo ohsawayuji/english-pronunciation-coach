@@ -38,9 +38,10 @@ def get_speech_synthesizer():
 def assess_pronunciation(audio_file_path, reference_text):
     speech_config = speechsdk.SpeechConfig(subscription=SPEECH_KEY, region=SPEECH_REGION)
     speech_config.speech_recognition_language = "en-US" 
-    audio_config = speechsdk.audio.AudioConfig(filename=audio_file_path)
-
-    # enable_miscue=True で、余計な単語や読み飛ばしを詳細に検知します
+    
+    # --- 処理1：発音評価（採点・色分け用） ---
+    # ここでは「正解文」を意識して採点させます
+    audio_config_score = speechsdk.audio.AudioConfig(filename=audio_file_path)
     pronunciation_config = speechsdk.PronunciationAssessmentConfig(
         reference_text=reference_text,
         grading_system=speechsdk.PronunciationAssessmentGradingSystem.HundredMark,
@@ -48,16 +49,25 @@ def assess_pronunciation(audio_file_path, reference_text):
     )
     pronunciation_config.enable_miscue = True
 
-    recognizer = speechsdk.SpeechRecognizer(speech_config=speech_config, audio_config=audio_config)
-    pronunciation_config.apply_to(recognizer)
+    recognizer_score = speechsdk.SpeechRecognizer(speech_config=speech_config, audio_config=audio_config_score)
+    pronunciation_config.apply_to(recognizer_score)
+    result_score = recognizer_score.recognize_once_async().get()
 
-    result = recognizer.recognize_once_async().get()
+    # --- 処理2：純粋な文字起こし（聞き取り内容表示用） ---
+    # ここでは「正解文」を無視して、聞こえたままを文字にします
+    audio_config_raw = speechsdk.audio.AudioConfig(filename=audio_file_path)
+    recognizer_raw = speechsdk.SpeechRecognizer(speech_config=speech_config, audio_config=audio_config_raw)
+    result_raw = recognizer_raw.recognize_once_async().get()
+
+    # 評価結果オブジェクトの取得
+    pronunciation_result = None
+    if result_score.reason == speechsdk.ResultReason.RecognizedSpeech:
+        pronunciation_result = speechsdk.PronunciationAssessmentResult(result_score)
     
-    if result.reason == speechsdk.ResultReason.RecognizedSpeech:
-        pronunciation_result = speechsdk.PronunciationAssessmentResult(result)
-        return pronunciation_result
-    else:
-        return None
+    # 純粋な文字起こしテキストの取得
+    raw_transcription = result_raw.text if result_raw.reason == speechsdk.ResultReason.RecognizedSpeech else ""
+
+    return pronunciation_result, raw_transcription
 
 def generate_tts(text, filename):
     speech_config = get_speech_synthesizer()
@@ -97,7 +107,8 @@ if audio_value:
         f.write(audio_value.getbuffer())
 
     with st.spinner("AIが分析中..."):
-        score_result = assess_pronunciation(input_filename, target_text)
+        # 修正：戻り値を2つ受け取る
+        score_result, raw_text_heard = assess_pronunciation(input_filename, target_text)
 
     if score_result:
         words = score_result.words
@@ -108,21 +119,11 @@ if audio_value:
         weak_words = []
         feedback_html_parts = []
         
-        # ★ここが重要：実際に聞こえた単語だけを集めるリスト
-        heard_words_list = []
-        
-        # --- 判定ループ ---
+        # --- 判定ループ（色分け用） ---
         for word in words:
             error_type = str(word.error_type)
             
-            # --- 1. 「聞こえた内容」の再現ロジック ---
-            # Omission（読み飛ばし）以外はすべて「発声された」とみなしてリストに追加
-            if "Omission" not in error_type:
-                heard_words_list.append(word.word)
-
-            # --- 2. 採点と表示用ロジック ---
-            
-            # (A) 挿入誤り（Insertion）: 余計な単語
+            # (A) 挿入誤り（Insertion）: 正解文にはない余計な単語
             if "Insertion" in error_type:
                 feedback_html_parts.append(
                     f"<span style='color:purple; font-style:italic; font-size:18px; margin-right:5px;'>({word.word})</span>"
@@ -155,9 +156,6 @@ if audio_value:
                 )
 
         # --- 集計 ---
-        # ここで手動で文章を再構築します
-        reconstructed_heard_text = " ".join(heard_words_list)
-
         if total_words_for_score > 0:
             green_ratio = (green_count / total_words_for_score) * 100
         else:
@@ -186,15 +184,15 @@ if audio_value:
         # --- 📝 詳細レポート ---
         st.subheader("📝 詳細レポート")
         
-        # 👂 実際に聞こえた文章 (再構築したもの)
+        # 👂 実際に聞こえた文章 (純粋な文字起こし結果を使用)
         st.markdown("##### 👂 AIが聞き取った内容")
-        if not reconstructed_heard_text:
+        if not raw_text_heard:
              st.info("（音声が検出されませんでした）")
         else:
-             st.info(f"「 {reconstructed_heard_text} 」")
-             st.caption("※ 読み飛ばした箇所は消え、余計に言った言葉はそのまま表示されます。")
+             st.info(f"「 {raw_text_heard} 」")
+             st.caption("※ 上記はAIが先入観なしで聞き取った文字です。")
 
-        # 📊 添削結果
+        # 📊 添削結果 (採点結果を使用)
         st.markdown("##### 📊 添削結果")
         feedback_html = "<div style='line-height: 2.0;'>" + " ".join(feedback_html_parts) + "</div>"
         st.markdown(feedback_html, unsafe_allow_html=True)
@@ -228,7 +226,8 @@ if audio_value:
                     with open(practice_file, "wb") as f:
                         f.write(practice_audio.getbuffer())
                     
-                    p_score = assess_pronunciation(practice_file, selected_word)
+                    # 練習モードは単語単位なので、評価だけ行えばOK
+                    p_score, _ = assess_pronunciation(practice_file, selected_word)
                     
                     if p_score:
                         single_score = p_score.accuracy_score
