@@ -111,7 +111,7 @@ def generate_tts(text, filename):
 
 # --- UI ---
 st.title("🗣️ AI英語発音コーチ")
-st.info("判定強化：likeとlikes、friendとfriendsなどの違いも検知し、紫タグで表示します。")
+st.info("判定強化：スペル不一致（like⇔likes等）の場合、発音が良くても強制的に減点表示（黄色/赤）にします。")
 
 if 'target_text' not in st.session_state:
     st.session_state.target_text = "I like playing soccer with my friends."
@@ -177,6 +177,36 @@ if audio_value:
             raw_error = pron_acc.get('ErrorType') or w.get('ErrorType') or 'None'
             score = pron_acc.get('AccuracyScore', 0)
             
+            # ★★★ 強制減点ロジック (Penalty Check) ★★★
+            # 実際に発音された単語(Raw)と重なるかチェックし、スペルが違う場合はスコアを強制的に下げる
+            penalty_applied = False
+            overlap_word = ""
+
+            for r_w in words_raw:
+                r_offset = r_w.get('Offset', 0)
+                r_duration = r_w.get('Duration', 0)
+                r_center = r_offset + (r_duration / 2)
+                
+                # Assessment単語の範囲内か？
+                a_start = offset
+                a_end = offset + duration
+                
+                if a_start <= r_center <= a_end:
+                    # 重なっている
+                    r_text = r_w.get('Word') or r_w.get('DisplayWord')
+                    if normalize_word(word_text) != normalize_word(r_text):
+                        penalty_applied = True
+                        overlap_word = r_text
+                    break # 1つ見つかれば判定終了
+            
+            # スコア操作
+            debug_note = ""
+            if penalty_applied:
+                if score >= 85:
+                    score = 80 # 強制的に黄色(84以下)にする
+                    debug_note = " (Penalty Applied)"
+            
+            # 判定ロジック
             final_error = "Normal"
             html = ""
             
@@ -188,7 +218,7 @@ if audio_value:
                 weak_words.append(word_text)
                 final_error = "Omission"
                 html = f"<span class='word-omission'>{word_text}</span>"
-            elif raw_error == "Mispronunciation" and score <= 40:
+            elif raw_error == "Mispronunciation" and score <= 40: # 元スコアが低い場合
                 total_words_for_score += 1
                 weak_words.append(word_text)
                 final_error = "Low Score -> Omission"
@@ -201,11 +231,11 @@ if audio_value:
                     green_count += 1
                 elif score >= 75:
                     css = "word-yellow"
-                    final_error = "Good"
+                    final_error = "Good" + debug_note
                     weak_words.append(word_text)
                 else:
                     css = "word-red"
-                    final_error = "Bad"
+                    final_error = "Bad" + debug_note
                     weak_words.append(word_text)
                 html = f"<span class='{css}' title='{score}点'>{word_text}</span>"
 
@@ -220,41 +250,31 @@ if audio_value:
                 'score': score
             })
 
-        # B. Raw認識（聞き取り）の処理
-        # 「時間が重なっていても、単語のスペルが違えば表示する」ロジックへ変更
-        
+        # B. Raw認識（聞き取り）の処理 (Ghost表示)
         for r_w in words_raw:
             r_text = r_w.get('Word') or r_w.get('DisplayWord')
             r_offset = r_w.get('Offset', 0)
             r_duration = r_w.get('Duration', 0)
             
-            # チェック処理
             should_add_as_ghost = True
             
             for item in display_items:
                 if item['source'] == 'assessment':
-                    # 1. 時間の重なりを判定
                     a_start = item['offset']
                     a_end = item['offset'] + item['duration']
                     r_center = r_offset + (r_duration / 2)
                     
-                    is_overlapped = (a_start <= r_center <= a_end)
-                    
-                    if is_overlapped:
-                        # 2. 重なっている場合、単語が「同じ」か「違う」か判定
+                    if a_start <= r_center <= a_end:
+                        # 重なっている場合
                         norm_target = normalize_word(item['text'])
                         norm_raw = normalize_word(r_text)
                         
                         if norm_target == norm_raw:
-                            # 完全に一致する単語なら、Assessment側ですでに表示しているのでRawは無視
+                            # 完全一致ならGhost表示不要
                             should_add_as_ghost = False
                             break
                         else:
-                            # ★ここが重要★
-                            # 重なっているが単語が違う (friend vs friends, like vs likes)
-                            # -> この場合、Raw側の単語は「言い間違い（Ghost）」として表示対象に残す！
-                            # ただし、ループは抜けない（他の単語との重なりも見るためではないが、
-                            # ひとつのAssessment単語に対しての判定はここで完了）
+                            # 不一致ならGhost表示（例: Target(Yellow) + Ghost(Purple)）
                             pass
             
             if should_add_as_ghost:
@@ -262,7 +282,7 @@ if audio_value:
                     display_items.append({
                         'text': r_text,
                         'html': f"<span class='word-ghost'>{r_text}</span>",
-                        'offset': r_offset + 1, # 並び順で元の単語の後ろに来るよう微調整
+                        'offset': r_offset + 1,
                         'duration': r_duration,
                         'source': 'raw_ghost',
                         'debug_raw': 'Mismatch/Insertion',
@@ -299,7 +319,7 @@ if audio_value:
         st.markdown("##### 👂 聞き取り内容")
         st.info(f"「 {raw_text_heard} 」")
 
-        st.markdown("##### 📊 添削結果 (スペル不一致も表示)")
+        st.markdown("##### 📊 添削結果")
         final_html = "".join(final_html_parts)
         st.markdown(f"<div class='correction-box'>{final_html}</div>", unsafe_allow_html=True)
         st.caption("凡例: 🟢OK 🔴NG 🔘取り消し線(読み飛ばし/不一致元) 🟣紫バッジ(実際に言った単語/挿入語)")
@@ -314,12 +334,13 @@ if audio_value:
                 "単語": item['text'],
                 "ソース": item['source'],
                 "判定": item['debug_final'],
+                "修正後Score": item['score']
             })
         st.dataframe(pd.DataFrame(debug_data))
 
         st.divider()
         
-        # 弱点特訓セクションは変更なし（省略せず記述）
+        # 弱点特訓セクション
         if len(weak_words) > 0:
             st.subheader("🔥 弱点特訓コーナー")
             unique_weak_words = [w for w in list(dict.fromkeys(weak_words)) if w != "???"]
@@ -343,7 +364,7 @@ if audio_value:
                             elif s >= 75: st.warning(f"🟡 {s:.0f}点")
                             else: st.error(f"🔴 {s:.0f}点")
         else:
-            st.success("Weak wordsなし")
+            st.success("弱点単語はありません")
 
         with st.expander("🛠️ 開発用データ確認"):
             st.write("Words (Assessment):")
@@ -355,4 +376,5 @@ if audio_value:
         st.error("音声を認識できませんでした。")
     elif result_obj.reason == speechsdk.ResultReason.Canceled:
         st.error("処理中断。APIキーを確認してください。")
+
 
