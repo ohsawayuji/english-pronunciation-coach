@@ -23,11 +23,10 @@ try:
 except:
     st.error("設定エラー: APIキーが設定されていません。")
 
-# --- セッション管理（ユーザーごとのID作成） ---
+# --- セッション管理 ---
 if 'user_id' not in st.session_state:
     st.session_state.user_id = str(uuid.uuid4())
 
-# ユーザー固有のファイル名を作る関数
 def get_filename(base_name):
     return f"{base_name}_{st.session_state.user_id}.wav"
 
@@ -100,17 +99,26 @@ if audio_value:
         score_result, raw_result = assess_pronunciation(input_filename, target_text)
 
     if score_result:
-        # --- 集計ロジック ---
         words = speechsdk.PronunciationAssessmentResult(raw_result).words
         total_words = 0
         green_count = 0
         weak_words = []
         word_details = []
         
+        # ★追加：実際に認識された単語リストを作成するための変数
+        recognized_words_list = []
+
         for word in words:
+            error_type_str = str(word.error_type)
+            
+            # --- 1. 実際に認識された文章を作るロジック ---
+            # 「読み飛ばし(Omission)」以外は、発声された言葉なのでリストに追加
+            if "Omission" not in error_type_str:
+                recognized_words_list.append(word.word)
+            
+            # --- 2. 採点ロジック ---
             if word.error_type != "Insertion":
                 total_words += 1
-                error_type_str = str(word.error_type)
                 
                 if "Omission" in error_type_str:
                     color = "gray"
@@ -135,34 +143,50 @@ if audio_value:
                     "color": color,
                     "error": error_type_str
                 })
+        
+        # 認識された文章を結合
+        recognized_sentence = " ".join(recognized_words_list)
 
         if total_words > 0:
             green_ratio = (green_count / total_words) * 100
         else:
             green_ratio = 0
 
-        # --- 結果表示 ---
+        # --- 結果表示エリア ---
+        
+        # 合否メッセージ
         if green_ratio >= 85:
             st.balloons()
-            st.success(f"🎉 合格！ 緑率: {green_ratio:.1f}%")
+            st.success(f"🎉 Excellent! 合格です！ (緑率: {green_ratio:.1f}%)")
         elif green_ratio >= 75:
-            st.warning(f"⚠️ 仮合格。 緑率: {green_ratio:.1f}%")
+            st.warning(f"⚠️ Good! 仮合格です。あと少し！ (緑率: {green_ratio:.1f}%)")
         else:
-            st.error(f"❌ 不合格。 緑率: {green_ratio:.1f}%")
+            st.error(f"❌ Try Again. 緑を増やしましょう。 (緑率: {green_ratio:.1f}%)")
 
+        # 3つの指標
         acc = score_result.accuracy_score if score_result.accuracy_score else 0
         flu = score_result.fluency_score if score_result.fluency_score else 0
         com = score_result.completeness_score if score_result.completeness_score else 0
         
         c1, c2, c3 = st.columns(3)
-        c1.metric("Accuracy", f"{acc:.0f}")
-        c2.metric("Fluency", f"{flu:.0f}")
-        c3.metric("Completeness", f"{com:.0f}")
+        c1.metric("Accuracy (正確さ)", f"{acc:.0f}")
+        c2.metric("Fluency (流暢さ)", f"{flu:.0f}")
+        c3.metric("Completeness (完全性)", f"{com:.0f}")
 
         st.divider()
 
+        # --- ★ここが新機能：AIが聞き取った内容の表示 ---
         st.subheader("📝 詳細レポート")
-        feedback_html = ""
+        
+        st.markdown("##### 👂 AIが聞き取った内容")
+        if recognized_sentence.strip() == "":
+            st.info("（何も聞き取れませんでした）")
+        else:
+            st.info(f"「 {recognized_sentence} 」")
+            st.caption("※ 読み飛ばした単語はここに含まれず、余計に読んだ単語はここに含まれます。")
+
+        st.markdown("##### 📊 採点と添削")
+        feedback_html = "<div style='line-height: 2.0;'>"
         for item in word_details:
             if "Omission" in item["error"]:
                 feedback_html += f"<span style='color:#b0b0b0; text-decoration:line-through; font-size:24px; margin-right:8px;'>{item['word']}</span> "
@@ -172,9 +196,11 @@ if audio_value:
         for word in words:
             if word.error_type == "Insertion":
                  feedback_html += f"<span style='color:purple; font-style:italic; font-size:18px;'>({word.word}?)</span> "
+        
+        feedback_html += "</div>"
 
         st.markdown(feedback_html, unsafe_allow_html=True)
-        st.caption("凡例: 🟢完璧  🟡惜しい  🔴ダメ  🔘グレー(読み飛ばし)")
+        st.caption("凡例: 🟢完璧  🟡惜しい  🔴発音NG  🔘読み飛ばし  (🟣余計な単語)")
 
         st.divider()
 
@@ -201,7 +227,6 @@ if audio_value:
                 
                 if practice_audio:
                     practice_file = get_filename("practice")
-                    
                     with open(practice_file, "wb") as f:
                         f.write(practice_audio.getbuffer())
                     
@@ -220,3 +245,4 @@ if audio_value:
 
     else:
         st.error("音声を認識できませんでした。")
+
