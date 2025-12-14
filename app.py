@@ -3,6 +3,7 @@ import azure.cognitiveservices.speech as speechsdk
 import os
 import time
 import uuid
+import json
 
 # --- ページ設定とメニュー非表示CSS ---
 st.set_page_config(page_title="AI英語発音コーチ", page_icon="🗣️")
@@ -12,17 +13,22 @@ hide_streamlit_style = """
             #MainMenu {visibility: hidden;}
             footer {visibility: hidden;}
             header {visibility: hidden;}
+            
             /* 添削結果を見やすくするためのCSS */
-            .correction-text {
+            .correction-box {
                 font-family: sans-serif;
                 line-height: 2.2;
-                font-size: 20px;
+                font-size: 22px;
+                background-color: #f9f9f9;
+                padding: 20px;
+                border-radius: 10px;
+                border: 1px solid #ddd;
             }
-            .word-green { color: #28a745; font-weight: bold; margin-right: 5px; }
-            .word-yellow { color: #ffc107; font-weight: bold; margin-right: 5px; }
-            .word-red { color: #dc3545; font-weight: bold; margin-right: 5px; }
-            .word-gray { color: #b0b0b0; text-decoration: line-through; margin-right: 5px; }
-            .word-purple { color: #6f42c1; font-style: italic; font-weight: bold; margin-left: 2px; margin-right: 8px; }
+            .word-green { color: #28a745; font-weight: bold; margin-right: 6px; }
+            .word-yellow { color: #d39e00; font-weight: bold; margin-right: 6px; }
+            .word-red { color: #dc3545; font-weight: bold; margin-right: 6px; }
+            .word-omission { color: #b0b0b0; text-decoration: line-through; margin-right: 6px; }
+            .word-insertion { color: #6f42c1; font-style: italic; font-weight: bold; margin-left: 2px; margin-right: 8px; }
             </style>
             """
 st.markdown(hide_streamlit_style, unsafe_allow_html=True)
@@ -57,10 +63,13 @@ def assess_pronunciation(audio_file_path, reference_text):
         grading_system=speechsdk.PronunciationAssessmentGradingSystem.HundredMark,
         granularity=speechsdk.PronunciationAssessmentGranularity.Phoneme
     )
-    pronunciation_config.enable_miscue = True # 重要：言い間違い検知オン
+    # これが重要：言い間違い検知をオンにする
+    pronunciation_config.enable_miscue = True 
 
     recognizer_score = speechsdk.SpeechRecognizer(speech_config=speech_config, audio_config=audio_config_score)
     pronunciation_config.apply_to(recognizer_score)
+    
+    # 実行
     result_score = recognizer_score.recognize_once_async().get()
 
     # 2. 聞き取り用（正解文無視）
@@ -68,13 +77,12 @@ def assess_pronunciation(audio_file_path, reference_text):
     recognizer_raw = speechsdk.SpeechRecognizer(speech_config=speech_config, audio_config=audio_config_raw)
     result_raw = recognizer_raw.recognize_once_async().get()
 
-    pronunciation_result = None
-    if result_score.reason == speechsdk.ResultReason.RecognizedSpeech:
-        pronunciation_result = speechsdk.PronunciationAssessmentResult(result_score)
+    # JSONデータを文字列として取得（これが最も確実です）
+    json_result_str = result_score.json
     
     raw_transcription = result_raw.text if result_raw.reason == speechsdk.ResultReason.RecognizedSpeech else ""
 
-    return pronunciation_result, raw_transcription
+    return json_result_str, raw_transcription, result_score
 
 def generate_tts(text, filename):
     speech_config = get_speech_synthesizer()
@@ -114,55 +122,64 @@ if audio_value:
         f.write(audio_value.getbuffer())
 
     with st.spinner("AIが分析中..."):
-        score_result, raw_text_heard = assess_pronunciation(input_filename, target_text)
+        # JSON文字列を受け取る
+        json_str, raw_text_heard, result_obj = assess_pronunciation(input_filename, target_text)
 
-    if score_result:
-        words = score_result.words
+    # JSONをパースして解析
+    if result_obj.reason == speechsdk.ResultReason.RecognizedSpeech:
+        data = json.loads(json_str)
+        # NBestの最初の候補を使う
+        words_data = data['NBest'][0]['Words']
         
+        # 全体スコア取得
+        pron_scores = data['NBest'][0]['PronunciationAssessment']
+        acc = pron_scores.get('AccuracyScore', 0)
+        flu = pron_scores.get('FluencyScore', 0)
+        com = pron_scores.get('CompletenessScore', 0)
+
         total_words_for_score = 0
         green_count = 0
         weak_words = []
         feedback_html_parts = []
-        
-        # --- 判定ループ ---
-        for word in words:
-            error_type = str(word.error_type)
-            
+
+        # --- JSONデータから単語ループ解析 ---
+        for word_info in words_data:
+            word_text = word_info['Word']
+            error_type = word_info.get('ErrorType', 'None') # Insertion, Omission, None, Mispronunciation
+            accuracy = word_info.get('AccuracyScore', 0)
+
             # --- ケース1: 余計な単語 (Insertion) ---
-            # 例: playing soccer (game)
-            if "Insertion" in error_type:
-                # 紫色のカッコ書きで表示
+            if error_type == "Insertion":
+                # 紫色のカッコ書き
                 feedback_html_parts.append(
-                    f"<span class='word-purple'>({word.word})</span>"
+                    f"<span class='word-insertion'>({word_text})</span>"
                 )
             
             # --- ケース2: 読み飛ばし (Omission) ---
-            # 例: playing (言わなかった) -> グレーの取り消し線
-            elif "Omission" in error_type:
+            elif error_type == "Omission":
                 total_words_for_score += 1
-                weak_words.append(word.word)
+                weak_words.append(word_text)
+                # グレーの取り消し線
                 feedback_html_parts.append(
-                    f"<span class='word-gray'>{word.word}</span>"
+                    f"<span class='word-omission'>{word_text}</span>"
                 )
 
-            # --- ケース3: 通常の評価 (正解 or 発音ミス) ---
+            # --- ケース3: 通常 or 発音ミス (None, Mispronunciation) ---
             else:
                 total_words_for_score += 1
                 
-                # スコア判定
-                if word.accuracy_score >= 85:
+                if accuracy >= 85:
                     css_class = "word-green"
                     green_count += 1
-                elif word.accuracy_score >= 75:
+                elif accuracy >= 75:
                     css_class = "word-yellow"
-                    weak_words.append(word.word)
+                    weak_words.append(word_text)
                 else:
                     css_class = "word-red"
-                    weak_words.append(word.word)
+                    weak_words.append(word_text)
                 
-                # 単語を表示
                 feedback_html_parts.append(
-                    f"<span class='{css_class}' title='{word.accuracy_score:.0f}点'>{word.word}</span>"
+                    f"<span class='{css_class}' title='{accuracy}点'>{word_text}</span>"
                 )
 
         # --- 集計 ---
@@ -180,10 +197,6 @@ if audio_value:
         else:
             st.error(f"❌ Try Again. 緑を増やしましょう。 (緑率: {green_ratio:.1f}%)")
 
-        acc = score_result.accuracy_score if score_result.accuracy_score else 0
-        flu = score_result.fluency_score if score_result.fluency_score else 0
-        com = score_result.completeness_score if score_result.completeness_score else 0
-        
         c1, c2, c3 = st.columns(3)
         c1.metric("Accuracy (正確さ)", f"{acc:.0f}")
         c2.metric("Fluency (流暢さ)", f"{flu:.0f}")
@@ -194,20 +207,31 @@ if audio_value:
         # --- 📝 詳細レポート ---
         st.subheader("📝 詳細レポート")
         
-        st.markdown("##### 👂 AIが聞き取った内容")
+        # 👂 実際に聞こえた文章
+        st.markdown("##### 👂 AIが聞き取った内容 (Raw Text)")
         if not raw_text_heard:
              st.info("（音声が検出されませんでした）")
         else:
              st.info(f"「 {raw_text_heard} 」")
-             st.caption("※ 上記はAIが先入観なしで聞き取った文字です。")
+             st.caption("※ ここには、あなたの発音がそのまま文字になって表示されます。")
 
-        st.markdown("##### 📊 添削結果")
+        # 📊 添削結果
+        st.markdown("##### 📊 添削結果 (Correction)")
         
-        # HTMLを組み立てて表示
-        feedback_html = f"<div class='correction-text'>{' '.join(feedback_html_parts)}</div>"
+        feedback_html = f"<div class='correction-box'>{''.join(feedback_html_parts)}</div>"
         st.markdown(feedback_html, unsafe_allow_html=True)
         
-        st.caption("凡例: 🟢完璧  🟡惜しい  🔴発音NG  🔘取り消し線:読み飛ばし  🟣(カッコ):余計な言葉")
+        st.markdown("""
+        <small>
+        <b>凡例:</b><br>
+        🟢 緑 = OK (Excellent)<br>
+        🔴 赤 = 発音NG (Try again)<br>
+        🔘 <span style='color:#b0b0b0; text-decoration:line-through;'>取り消し線</span> = 読み飛ばした単語 (Omission)<br>
+        🟣 <span style='color:#6f42c1; font-style: italic; font-weight: bold;'>(カッコ)</span> = 余計な単語 (Insertion)<br>
+        ※ <b>単語の言い間違い</b>は、「<span style='color:#b0b0b0; text-decoration:line-through;'>元の単語</span> <span style='color:#6f42c1; font-style: italic; font-weight: bold;'>(言った単語)</span>」のように並んで表示されます。<br>
+        （例: I like <span style='color:#b0b0b0; text-decoration:line-through;'>playing</span> <span style='color:#6f42c1; font-style: italic; font-weight: bold;'>(praying)</span> soccer.）
+        </small>
+        """, unsafe_allow_html=True)
 
         st.divider()
 
@@ -237,10 +261,14 @@ if audio_value:
                     with open(practice_file, "wb") as f:
                         f.write(practice_audio.getbuffer())
                     
-                    p_score, _ = assess_pronunciation(practice_file, selected_word)
+                    # 練習時は結果オブジェクトだけあればOK
+                    _, _, p_result = assess_pronunciation(practice_file, selected_word)
                     
-                    if p_score:
-                        single_score = p_score.accuracy_score
+                    if p_result.reason == speechsdk.ResultReason.RecognizedSpeech:
+                        # 簡易評価（練習モードはJSONパースまでしなくてOK）
+                        p_assess = speechsdk.PronunciationAssessmentResult(p_result)
+                        single_score = p_assess.accuracy_score
+                        
                         if single_score >= 85:
                             st.success(f"🎉 {single_score:.0f}点 (Excellent!)")
                         elif single_score >= 75:
@@ -251,4 +279,4 @@ if audio_value:
             st.success("弱点単語はありません！")
 
     else:
-        st.error("音声を認識できませんでした。")
+        st.error("音声を認識できませんでした。マイクの調子を確認してください。")
