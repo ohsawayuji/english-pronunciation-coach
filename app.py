@@ -113,25 +113,25 @@ if audio_value:
 
         # --- 判定ループ ---
         for word in words:
-            error_type = word.error_type
+            # ★ここを修正しました：エラータイプを安全に文字列で取得
+            error_type_str = str(word.error_type)
             
             # --- A. 「聞こえた音」リストの作成 ---
             # Omission（読み飛ばし）以外は、口から発せられた音なのでリストに入れる
-            if error_type != speechsdk.PronunciationAssessmentErrorType.Omission:
+            if "Omission" not in error_type_str:
                 heard_words_list.append(word.word)
 
             # --- B. 採点と色分け ---
             
             # 1. 挿入誤り（Insertion）: 余計な単語
-            if error_type == speechsdk.PronunciationAssessmentErrorType.Insertion:
+            if "Insertion" in error_type_str:
                 # 採点の分母には含めないが、表示は紫にする
                 feedback_html_parts.append(
                     f"<span style='color:purple; font-style:italic; font-size:18px;'>({word.word})</span>"
                 )
-                # 挿入された語も練習候補に入れたければここに追加（今回は除外）
             
             # 2. 読み飛ばし（Omission）: 言わなかった単語
-            elif error_type == speechsdk.PronunciationAssessmentErrorType.Omission:
+            elif "Omission" in error_type_str:
                 total_words_for_score += 1
                 weak_words.append(word.word)
                 feedback_html_parts.append(
@@ -207,42 +207,4 @@ if audio_value:
         # --- 🔥 弱点特訓コーナー ---
         if len(weak_words) > 0:
             st.subheader("🔥 弱点特訓コーナー")
-            st.write("赤・黄・グレー（読み飛ばし）の単語を練習しましょう。")
-
-            unique_weak_words = list(dict.fromkeys(weak_words))
-            selected_word = st.selectbox("練習する単語を選択:", unique_weak_words)
-
-            col_a, col_b = st.columns(2)
-            
-            with col_a:
-                st.markdown("##### 👂 ① お手本")
-                if st.button(f"Play: {selected_word}"):
-                    tts_single = get_filename("single_word_tts")
-                    generate_tts(selected_word, tts_single)
-                    st.audio(tts_single)
-            
-            with col_b:
-                st.markdown("##### 🎤 ② 録音")
-                practice_audio = st.audio_input(f"Record: {selected_word}", key="practice_rec")
-                
-                if practice_audio:
-                    practice_file = get_filename("practice")
-                    with open(practice_file, "wb") as f:
-                        f.write(practice_audio.getbuffer())
-                    
-                    p_score, p_raw = assess_pronunciation(practice_file, selected_word)
-                    
-                    if p_score:
-                        single_score = p_score.accuracy_score
-                        if single_score >= 85:
-                            st.success(f"🎉 {single_score:.0f}点 (Excellent!)")
-                        elif single_score >= 75:
-                            st.warning(f"🟡 {single_score:.0f}点 (Good)")
-                        else:
-                            st.error(f"🔴 {single_score:.0f}点 (Try again)")
-        else:
-            st.success("弱点単語はありません！")
-
-    else:
-        st.error("音声を認識できませんでした。")
-
+            st.write("赤
